@@ -1,0 +1,21 @@
+{
+    "manifest_version": 3,
+    "name": "Claude Browser Agent",
+    "version": "1.0.0",
+    "description": "AI agent that controls your browser",
+    "action": {
+      "default_popup": "popup/popup.html"
+
+    }, 
+    "background": {
+      "service_worker": "background.js"
+    },
+    "permissions": [
+      "tabs",
+      "scripting",
+      "storage"
+    ],
+    "host_permissions": [
+      "<all_urls>"
+    ]
+  }
