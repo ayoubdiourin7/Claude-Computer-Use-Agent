@@ -189,7 +189,8 @@ async function takeScreenshot() {
     
     // FIX: Ne pas passer windowId, juste les options
     const screenshot = await chrome.tabs.captureVisibleTab(null, {
-      format: 'png'
+        format: 'jpeg',
+        quality: 90
     });
     
     // Remove data URL prefix to get just base64
@@ -220,136 +221,137 @@ async function clickAt(x, y, button = 'left') {
     const result = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (x, y, button) => {
-        try {
-          let element = document.elementFromPoint(x, y);
-          
-          // VISUAL DEBUG: Red circle
-          const marker = document.createElement('div');
-          marker.style.cssText = `
-            position: fixed;
-            left: ${x - 10}px;
-            top: ${y - 10}px;
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            background-color: red;
-            border: 2px solid white;
-            z-index: 999999;
-            pointer-events: none;
-          `;
-          document.body.appendChild(marker);
-          setTimeout(() => marker.remove(), 2000);
-          
-          if (!element) {
-            return { success: false, error: 'No element at coordinates' };
-          }
-          
-          // Check if clickable
-          const isClickable = (el) => {
-            if (!el || !el.tagName) return false;
-            return el.onclick !== null || 
-                   el.tagName === 'A' || 
-                   el.tagName === 'BUTTON' ||
-                   el.getAttribute('role') === 'button' ||
-                   el.hasAttribute('onclick') ||
-                   window.getComputedStyle(el).cursor === 'pointer';
-          };
-          
-          // Original element info
-          const getInfo = (el) => {
-            if (!el) return { tag: 'NONE' };
-            return {
-              tag: el.tagName || 'UNKNOWN',
-              id: el.id || 'no-id',
-              class: (el.className || 'no-class').toString().substring(0, 50),
-              text: ((el.innerText || el.textContent || 'no-text').substring(0, 50)).trim(),
-              clickable: isClickable(el)
-            };
-          };
-          
-          const originalInfo = getInfo(element);
-          
-          // Find clickable parent
-          let clickTarget = element;
-          let depth = 0;
-          
-          while (!isClickable(clickTarget) && depth < 5 && clickTarget.parentElement) {
-            clickTarget = clickTarget.parentElement;
-            depth++;
-          }
-          
-          const clickedInfo = getInfo(clickTarget);
-          clickedInfo.depth = depth;
-          
-          // Focus inputs
-          if (clickTarget.tagName === 'INPUT' || clickTarget.tagName === 'TEXTAREA') {
-            clickTarget.focus();
-          }
-          
-          // CLICK with multiple methods
-          // Method 1: MouseEvent
-          clickTarget.dispatchEvent(new MouseEvent('click', {
-            view: window,
-            bubbles: true,
-            cancelable: true,
-            clientX: x,
-            clientY: y,
-            button: button === 'right' ? 2 : button === 'middle' ? 1 : 0
-          }));
-          
-          // Method 2: Native click
-          clickTarget.click();
-          
-          // Method 3: mousedown + mouseup
-          clickTarget.dispatchEvent(new MouseEvent('mousedown', {
-            view: window, bubbles: true, cancelable: true, clientX: x, clientY: y
-          }));
-          clickTarget.dispatchEvent(new MouseEvent('mouseup', {
-            view: window, bubbles: true, cancelable: true, clientX: x, clientY: y
-          }));
-          
-          // Return result
-          return {
-            success: true,
-            original: originalInfo,
-            clicked: clickedInfo,
-            isLink: clickTarget.tagName === 'A',
-            href: clickTarget.href || null
-          };
-          
-        } catch (err) {
-          return { success: false, error: err.message };
+        let element = document.elementFromPoint(x, y);
+        
+        // VISUAL DEBUG: Add red circle at click position
+        const marker = document.createElement('div');
+        marker.style.position = 'fixed';
+        marker.style.left = (x - 10) + 'px';
+        marker.style.top = (y - 10) + 'px';
+        marker.style.width = '20px';
+        marker.style.height = '20px';
+        marker.style.borderRadius = '50%';
+        marker.style.backgroundColor = 'red';
+        marker.style.border = '2px solid white';
+        marker.style.zIndex = '999999';
+        marker.style.pointerEvents = 'none';
+        document.body.appendChild(marker);
+        setTimeout(() => marker.remove(), 2000);
+        
+        if (!element) {
+          return { success: false, error: 'No element found at coordinates' };
         }
+        
+        // SMART CLICK: Find the closest clickable element
+        let clickableElement = element;
+        let depth = 0;
+        const maxDepth = 5;
+        
+        // Check if element itself is clickable
+        const isClickable = (el) => {
+          return el.onclick !== null || 
+                 el.tagName === 'A' || 
+                 el.tagName === 'BUTTON' ||
+                 el.getAttribute('role') === 'button' ||
+                 el.hasAttribute('onclick') ||
+                 el.style.cursor === 'pointer';
+        };
+        
+        // Walk up the DOM tree to find clickable parent
+        while (!isClickable(clickableElement) && depth < maxDepth && clickableElement.parentElement) {
+          clickableElement = clickableElement.parentElement;
+          depth++;
+        }
+        
+        // Get element info
+        const elementInfo = {
+          original: {
+            tag: element.tagName,
+            id: element.id || 'no-id',
+            class: element.className.toString().substring(0, 50) || 'no-class',
+            text: (element.innerText || element.textContent || 'no-text').substring(0, 50)
+          },
+          clicked: {
+            tag: clickableElement.tagName,
+            id: clickableElement.id || 'no-id',
+            class: clickableElement.className.toString().substring(0, 50) || 'no-class',
+            text: (clickableElement.innerText || clickableElement.textContent || 'no-text').substring(0, 30),
+            isClickable: isClickable(clickableElement),
+            depth: depth
+          }
+        };
+        
+        // Focus if it's an input
+        if (clickableElement.tagName === 'INPUT' || clickableElement.tagName === 'TEXTAREA') {
+          clickableElement.focus();
+        }
+        
+        // Perform clicks with multiple methods
+        // Method 1: MouseEvent on clickable element
+        const clickEvent = new MouseEvent('click', {
+          view: window,
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y,
+          button: button === 'right' ? 2 : button === 'middle' ? 1 : 0
+        });
+        clickableElement.dispatchEvent(clickEvent);
+        
+        // Method 2: Native click
+        clickableElement.click();
+        
+        // Method 3: mousedown + mouseup (more reliable for some sites)
+        const mousedown = new MouseEvent('mousedown', {
+          view: window,
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y
+        });
+        const mouseup = new MouseEvent('mouseup', {
+          view: window,
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y
+        });
+        clickableElement.dispatchEvent(mousedown);
+        clickableElement.dispatchEvent(mouseup);
+        
+        // For links
+        if (clickableElement.tagName === 'A' && clickableElement.href) {
+          return { 
+            success: true, 
+            elementInfo, 
+            isLink: true, 
+            href: clickableElement.href 
+          };
+        }
+        
+        return { success: true, elementInfo };
       },
       args: [x, y, button]
     });
     
     const scriptResult = result[0]?.result;
     
-    if (!scriptResult) {
-      console.error('❌ No result from script');
-      return { success: false, error: 'No result' };
+    // Log detailed info
+    if (scriptResult?.elementInfo) {
+      console.log('📍 Original element:', scriptResult.elementInfo.original);
+      console.log('🎯 Clicked element:', scriptResult.elementInfo.clicked);
+      
+      if (scriptResult.elementInfo.clicked.depth > 0) {
+        console.log(`   ↑ Walked up ${scriptResult.elementInfo.clicked.depth} levels to find clickable element`);
+      }
     }
     
-    if (scriptResult.error) {
-      console.error('❌ Script error:', scriptResult.error);
-      return scriptResult;
+    if (scriptResult?.isLink) {
+      console.log('🔗 Link clicked:', scriptResult.href);
     }
     
-    // Log results
-    console.log('📍 Original element:', scriptResult.original);
-    console.log('🎯 Clicked element:', scriptResult.clicked);
-    
-    if (scriptResult.clicked.depth > 0) {
-      console.log(`   ↑ Walked up ${scriptResult.clicked.depth} levels`);
-    }
-    
-    if (scriptResult.isLink) {
-      console.log('🔗 Link:', scriptResult.href);
-    }
-    
-    console.log('✅ Click successful');
-    return scriptResult;
+    console.log('✅ Click result:', scriptResult?.success);
+    return scriptResult || { success: true };
     
   } catch (error) {
     console.error('❌ Click error:', error);
