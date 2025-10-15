@@ -53,8 +53,8 @@ class ChromeAdapter:
                 break
             await asyncio.sleep(0.1)
             
-        if self._waiting_for_response:
-            raise TimeoutError("Extension did not respond in time")
+        '''if self._waiting_for_response:
+            raise TimeoutError("Extension did not respond in time")'''
             
         return self.last_action_result or {}
         

@@ -20,7 +20,7 @@ function connectToPython() {
   isConnecting = true;
   console.log('🔌 Connecting to Python backend...');
   
-  ws = new WebSocket('ws://localhost:8765'); // Adjust port if needed with the config port
+  ws = new WebSocket('ws://localhost:8765');
   
   ws.onopen = () => {
     console.log('✅ Connected to Python backend');
@@ -187,7 +187,8 @@ async function takeScreenshot() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
-    const screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, {
+    // FIX: Ne pas passer windowId, juste les options
+    const screenshot = await chrome.tabs.captureVisibleTab(null, {
       format: 'png'
     });
     
@@ -199,8 +200,8 @@ async function takeScreenshot() {
     sendToPython({
       type: 'screenshot',
       data: base64Data,
-      width: tab.width,
-      height: tab.height
+      width: tab.width || 1280,
+      height: tab.height || 800
     });
     
     return { success: true, data: 'Screenshot sent' };
@@ -216,29 +217,142 @@ async function clickAt(x, y, button = 'left') {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
-    await chrome.scripting.executeScript({
+    const result = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (x, y, button) => {
-        const element = document.elementFromPoint(x, y);
-        if (element) {
-          const event = new MouseEvent('click', {
+        try {
+          let element = document.elementFromPoint(x, y);
+          
+          // VISUAL DEBUG: Red circle
+          const marker = document.createElement('div');
+          marker.style.cssText = `
+            position: fixed;
+            left: ${x - 10}px;
+            top: ${y - 10}px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background-color: red;
+            border: 2px solid white;
+            z-index: 999999;
+            pointer-events: none;
+          `;
+          document.body.appendChild(marker);
+          setTimeout(() => marker.remove(), 2000);
+          
+          if (!element) {
+            return { success: false, error: 'No element at coordinates' };
+          }
+          
+          // Check if clickable
+          const isClickable = (el) => {
+            if (!el || !el.tagName) return false;
+            return el.onclick !== null || 
+                   el.tagName === 'A' || 
+                   el.tagName === 'BUTTON' ||
+                   el.getAttribute('role') === 'button' ||
+                   el.hasAttribute('onclick') ||
+                   window.getComputedStyle(el).cursor === 'pointer';
+          };
+          
+          // Original element info
+          const getInfo = (el) => {
+            if (!el) return { tag: 'NONE' };
+            return {
+              tag: el.tagName || 'UNKNOWN',
+              id: el.id || 'no-id',
+              class: (el.className || 'no-class').toString().substring(0, 50),
+              text: ((el.innerText || el.textContent || 'no-text').substring(0, 50)).trim(),
+              clickable: isClickable(el)
+            };
+          };
+          
+          const originalInfo = getInfo(element);
+          
+          // Find clickable parent
+          let clickTarget = element;
+          let depth = 0;
+          
+          while (!isClickable(clickTarget) && depth < 5 && clickTarget.parentElement) {
+            clickTarget = clickTarget.parentElement;
+            depth++;
+          }
+          
+          const clickedInfo = getInfo(clickTarget);
+          clickedInfo.depth = depth;
+          
+          // Focus inputs
+          if (clickTarget.tagName === 'INPUT' || clickTarget.tagName === 'TEXTAREA') {
+            clickTarget.focus();
+          }
+          
+          // CLICK with multiple methods
+          // Method 1: MouseEvent
+          clickTarget.dispatchEvent(new MouseEvent('click', {
             view: window,
             bubbles: true,
             cancelable: true,
+            clientX: x,
+            clientY: y,
             button: button === 'right' ? 2 : button === 'middle' ? 1 : 0
-          });
-          element.dispatchEvent(event);
-          return true;
+          }));
+          
+          // Method 2: Native click
+          clickTarget.click();
+          
+          // Method 3: mousedown + mouseup
+          clickTarget.dispatchEvent(new MouseEvent('mousedown', {
+            view: window, bubbles: true, cancelable: true, clientX: x, clientY: y
+          }));
+          clickTarget.dispatchEvent(new MouseEvent('mouseup', {
+            view: window, bubbles: true, cancelable: true, clientX: x, clientY: y
+          }));
+          
+          // Return result
+          return {
+            success: true,
+            original: originalInfo,
+            clicked: clickedInfo,
+            isLink: clickTarget.tagName === 'A',
+            href: clickTarget.href || null
+          };
+          
+        } catch (err) {
+          return { success: false, error: err.message };
         }
-        return false;
       },
       args: [x, y, button]
     });
     
-    console.log('✅ Click executed');
-    return { success: true };
+    const scriptResult = result[0]?.result;
+    
+    if (!scriptResult) {
+      console.error('❌ No result from script');
+      return { success: false, error: 'No result' };
+    }
+    
+    if (scriptResult.error) {
+      console.error('❌ Script error:', scriptResult.error);
+      return scriptResult;
+    }
+    
+    // Log results
+    console.log('📍 Original element:', scriptResult.original);
+    console.log('🎯 Clicked element:', scriptResult.clicked);
+    
+    if (scriptResult.clicked.depth > 0) {
+      console.log(`   ↑ Walked up ${scriptResult.clicked.depth} levels`);
+    }
+    
+    if (scriptResult.isLink) {
+      console.log('🔗 Link:', scriptResult.href);
+    }
+    
+    console.log('✅ Click successful');
+    return scriptResult;
+    
   } catch (error) {
-    console.error('Click error:', error);
+    console.error('❌ Click error:', error);
     return { success: false, error: error.message };
   }
 }
@@ -249,24 +363,43 @@ async function typeText(text) {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
-    await chrome.scripting.executeScript({
+    const result = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (text) => {
         const activeElement = document.activeElement;
-        if (activeElement && (activeElement.tagName === 'INPUT' || 
-                              activeElement.tagName === 'TEXTAREA' ||
-                              activeElement.isContentEditable)) {
-          activeElement.value = (activeElement.value || '') + text;
-          activeElement.dispatchEvent(new Event('input', { bubbles: true }));
-          return true;
+        console.log('Typing into:', activeElement);
+        
+        if (!activeElement) {
+          return { success: false, error: 'No active element' };
         }
-        return false;
+        
+        // Handle different element types
+        if (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA') {
+          // For input/textarea, set value
+          activeElement.value = (activeElement.value || '') + text;
+          
+          // Trigger events
+          activeElement.dispatchEvent(new Event('input', { bubbles: true }));
+          activeElement.dispatchEvent(new Event('change', { bubbles: true }));
+          
+          return { success: true, element: activeElement.tagName };
+          
+        } else if (activeElement.isContentEditable) {
+          // For contentEditable, insert text
+          document.execCommand('insertText', false, text);
+          return { success: true, element: 'contentEditable' };
+          
+        } else {
+          return { success: false, error: 'Element not editable' };
+        }
       },
       args: [text]
     });
     
-    console.log('✅ Text typed');
-    return { success: true };
+    const scriptResult = result[0]?.result;
+    console.log('✅ Type result:', scriptResult);
+    return scriptResult || { success: true };
+    
   } catch (error) {
     console.error('Type error:', error);
     return { success: false, error: error.message };
@@ -279,22 +412,45 @@ async function pressKey(key) {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
-    await chrome.scripting.executeScript({
+    const result = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (key) => {
-        const keyEvent = new KeyboardEvent('keydown', {
-          key: key,
-          bubbles: true,
-          cancelable: true
+        const activeElement = document.activeElement;
+        console.log('Active element:', activeElement);
+        
+        if (!activeElement) {
+          return { success: false, error: 'No active element' };
+        }
+        
+        // Send multiple key events for better compatibility
+        const events = ['keydown', 'keypress', 'keyup'];
+        
+        events.forEach(eventType => {
+          const keyEvent = new KeyboardEvent(eventType, {
+            key: key,
+            code: key === 'Enter' ? 'Enter' : key === 'Tab' ? 'Tab' : key,
+            bubbles: true,
+            cancelable: true
+          });
+          activeElement.dispatchEvent(keyEvent);
         });
-        document.activeElement?.dispatchEvent(keyEvent);
-        return true;
+        
+        // Special handling for Enter
+        if (key === 'Enter') {
+          if (activeElement.form) {
+            activeElement.form.submit();
+          }
+        }
+        
+        return { success: true, element: activeElement.tagName };
       },
       args: [key]
     });
     
-    console.log('✅ Key pressed');
-    return { success: true };
+    const scriptResult = result[0]?.result;
+    console.log('✅ Key result:', scriptResult);
+    return scriptResult || { success: true };
+    
   } catch (error) {
     console.error('Key press error:', error);
     return { success: false, error: error.message };

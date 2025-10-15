@@ -45,20 +45,19 @@ class BrowserAgentServer:
             message_type = data.get("type")
             
             print(f"\n📥 Received from Extension: {message_type}")
-            print(f"   Full message: {data}")
-            if message_type == "task":
+            '''if message_type == "task":
                 print("🔗 Connection test successful")
                 # Send response back
                 await self.websocket.send(json.dumps({
                     "type": "response",
                     "message": "Connection OK!"
-                }))
+                }))'''
             
-            elif message_type == "task":
+            if message_type == "task":
                 # New task from user
                 task = data.get("task")
                 print(f"📋 Task: {task}")
-                await self.orchestrator.execute_task(task)
+                asyncio.create_task(self.orchestrator.execute_task(task)) 
                 
             elif message_type == "screenshot":
                 # Screenshot response from extension
@@ -95,7 +94,8 @@ class BrowserAgentServer:
         async with websockets.serve(
             self.handle_client,
             config.WEBSOCKET_HOST,
-            config.WEBSOCKET_PORT
+            config.WEBSOCKET_PORT,
+            max_size=10 * 1024 * 1024  # i specify max message size because large screenshots crash the server  
         ):
             await asyncio.Future()  # Run forever
 

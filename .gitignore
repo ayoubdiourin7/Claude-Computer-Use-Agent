@@ -33,3 +33,5 @@ lib64/
 # OS
 .DS_Store
 Thumbs.db
+
+*.png
