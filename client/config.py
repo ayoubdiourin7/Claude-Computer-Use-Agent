@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Anthropic API Configuration
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 # Claude Model
 CLAUDE_MODEL = "claude-sonnet-4.5-20250929"
@@ -33,6 +33,8 @@ def validate_config():
             "ANTHROPIC_API_KEY not found. "
             "Please set it in .env file or environment variables."
         )'''
+    else:
+        print("✅ ANTHROPIC_API_KEY found")
     
     print("✅ Configuration loaded successfully")
     #print(f"   Model: {CLAUDE_MODEL}")

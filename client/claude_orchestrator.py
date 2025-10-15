@@ -6,7 +6,6 @@ import anthropic
 from typing import List, Dict, Any
 import base64
 
-import asyncio
 import config
 from chrome_adapter import ChromeAdapter
 
@@ -22,107 +21,77 @@ class ClaudeOrchestrator:
     async def execute_task(self, task: str):
         """Execute a task using Claude Computer Use"""
         print(f"\n{'='*60}")
-        print(f"🎯 TESTING BROWSER CONTROLS: {task}")
+        print(f"🎯 EXECUTING TASK: {task}")
         print(f"{'='*60}\n")
         
-        try:
-            # TEST 1: Initial screenshot
-            print("\n--- TEST 1: Screenshot ---")
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_1_initial.png")
-            print("✅ Initial screenshot saved")
+        # Initialize conversation with the task
+        self.messages = [
+            {
+                "role": "user",
+                "content": task
+            }
+        ]
+        
+        # Computer Use loop
+        max_iterations = 20
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
+            print(f"\n--- Iteration {iteration} ---")
             
-            await asyncio.sleep(1)
+            try:
+                # Get current screenshot
+                print("📸 Taking screenshot...")
+                screenshot = await self.chrome_adapter.get_screenshot()
+                
+                if not screenshot:
+                    print("❌ Failed to get screenshot")
+                    break
+                
+                # Call Claude with Computer Use
+                print("🤖 Calling Claude API...")
+                response = await self.call_claude_with_screenshot(screenshot)
+                
+                # Check if task is complete
+                if response.stop_reason == "end_turn":
+                    print("\n✅ Task completed!")
+                    final_message = self.extract_final_message(response)
+                    if final_message:
+                        print(f"💬 Claude says: {final_message}")
+                    break
+                
+                # Process tool uses
+                tool_uses = [
+                    block for block in response.content 
+                    if block.type == "tool_use"
+                ]
+                
+                if not tool_uses:
+                    print("⚠️ No tool use found, ending...")
+                    break
+                
+                # Execute each tool use
+                for tool_use in tool_uses:
+                    await self.execute_tool_use(tool_use)
+                
+                # Add response to messages
+                self.messages.append({
+                    "role": "assistant",
+                    "content": response.content
+                })
+                
+            except Exception as e:
+                print(f"❌ Error in iteration {iteration}: {e}")
+                break
+        
+        if iteration >= max_iterations:
+            print(f"\n⚠️ Reached maximum iterations ({max_iterations})")
             
-            # TEST 2: Navigate to a test page
-            print("\n--- TEST 2: Navigate ---")
-            await self.chrome_adapter.navigate("https://www.gmail.com/")
-            await asyncio.sleep(2)
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_2_navigate.png")
-            print("✅ Navigation screenshot saved")
-            
-            # TEST 3: Click at center of page
-            print("\n--- TEST 3: Click (640, 400) ---")
-            await self.chrome_adapter.click(640, 400, "left")
-            await asyncio.sleep(1)
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_3_click.png")
-            print("✅ Click screenshot saved")
-            
-            # TEST 4: Scroll down
-            print("\n--- TEST 4: Scroll Down ---")
-            await self.chrome_adapter.scroll("down", 200)
-            await asyncio.sleep(1)
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_4_scroll_down.png")
-            print("✅ Scroll down screenshot saved")
-            
-            # TEST 5: Scroll up
-            print("\n--- TEST 5: Scroll Up ---")
-            await self.chrome_adapter.scroll("up", 200)
-            await asyncio.sleep(1)
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_5_scroll_up.png")
-            print("✅ Scroll up screenshot saved")
-            
-            # TEST 6: Navigate to Google
-            print("\n--- TEST 6: Navigate to Google ---")
-            await self.chrome_adapter.navigate("https://www.google.com")
-            await asyncio.sleep(2)
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_6_google.png")
-            print("✅ Google screenshot saved")
-            
-            # TEST 7: Click on search box (approximate center)
-            print("\n--- TEST 7: Click Search Box ---")
-            await self.chrome_adapter.click(640, 400, "left")
-            await asyncio.sleep(0.5)
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_7_click_search.png")
-            print("✅ Click search screenshot saved")
-            
-            # TEST 8: Type text
-            print("\n--- TEST 8: Type Text ---")
-            await self.chrome_adapter.type_text("Hello from Claude Agent")
-            await asyncio.sleep(1)
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_8_type.png")
-            print("✅ Type screenshot saved")
-            
-            # TEST 9: Press Enter
-            print("\n--- TEST 9: Press Enter ---")
-            await self.chrome_adapter.key_press("Enter")
-            await asyncio.sleep(2)
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_9_enter.png")
-            print("✅ Enter screenshot saved")
-            
-            # TEST 10: Final scroll
-            print("\n--- TEST 10: Final Scroll ---")
-            await self.chrome_adapter.scroll("down", 300)
-            await asyncio.sleep(1)
-            screenshot = await self.chrome_adapter.get_screenshot()
-            self.save_screenshot(screenshot, "test_10_final_scroll.png")
-            print("✅ Final screenshot saved")
-            
-            print("\n" + "="*60)
-            print("✅ ALL TESTS COMPLETED!")
-            print("📁 Check screenshots: test_*.png")
-            print("="*60 + "\n")
-            
-        except Exception as e:
-            print(f"❌ Test failed: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def save_screenshot(self, screenshot_base64: str, filename: str):
-        """Save screenshot to file for debugging"""
-        if screenshot_base64:
-            import base64
-            with open(filename, "wb") as f:
-                f.write(base64.b64decode(screenshot_base64))
-            print(f"💾 Saved: {filename}") 
+        print(f"\n{'='*60}")
+        print("Task execution finished")
+        print(f"{'='*60}\n")
+        
     async def call_claude_with_screenshot(self, screenshot_base64: str):
         """Call Claude API with Computer Use tool and screenshot"""
         
@@ -134,7 +103,7 @@ class ClaudeOrchestrator:
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": "image/png",
+                        "media_type": "image/jpeg",  # ← CHANGE: jpeg instead of png
                         "data": screenshot_base64
                     }
                 },
@@ -149,21 +118,68 @@ class ClaudeOrchestrator:
         messages = self.messages + [user_message]
         
         # Define Computer Use tool
-        computer_tool = {
+        '''computer_tool = {
             "type": "computer_20241022",
             "name": "computer",
             "display_width_px": config.SCREENSHOT_WIDTH,
             "display_height_px": config.SCREENSHOT_HEIGHT,
             "display_number": 1
         }
-        
-        # Call Claude
-        response = self.client.messages.create(
-            model=config.CLAUDE_MODEL,
+        tools=[
+        {
+          "type": "computer_20250124",
+          "name": "computer",
+          "display_width_px": 1024,
+          "display_height_px": 768,
+          "display_number": 1,
+        },
+        {
+          "type": "text_editor_20250124",
+          "name": "str_replace_editor"
+        },
+        {
+          "type": "bash_20250124",
+          "name": "bash"
+        }
+    ]
+    # Call Claude with beta API
+        response = self.client.beta.messages.create(  # ← .beta est crucial!
+            #model=config.CLAUDE_MODEL,
+            model="claude-sonnet-4-5",
             max_tokens=config.MAX_TOKENS,
             messages=messages,
-            tools=[computer_tool]
-        )
+            tools=[computer_tool],
+            betas=["computer-use-2025-01-24"])'''
+
+
+        #client = anthropic.Anthropic()
+
+        response = self.client.beta.messages.create(
+                model="claude-sonnet-4-5",  # or another compatible model
+                max_tokens=1024,
+                tools=[
+                    {
+                    "type": "computer_20250124",
+                    "name": "computer",
+                    "display_width_px": 1024,
+                    "display_height_px": 768,
+                    "display_number": 1,
+                    },
+                    {
+                    "type": "text_editor_20250124",
+                    "name": "str_replace_editor"
+                    },
+                    {
+                    "type": "bash_20250124",
+                    "name": "bash"
+                    }
+                ],
+                messages=[{"role": "user", "content": "Save a picture of a cat to my desktop."}],
+                betas=["computer-use-2025-01-24"]
+            )
+        
+        print(response)
+        exit()
         
         return response
         
