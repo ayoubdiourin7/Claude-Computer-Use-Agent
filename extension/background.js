@@ -60,9 +60,21 @@ function sendToPython(data) {
     return false;
   }
   
-  ws.send(JSON.stringify(data));
-  console.log('📤 Sent to Python:', data.type);
-  return true;
+  // If data is too large, log its size
+  const jsonData = JSON.stringify(data);
+  const sizeInMB = jsonData.length / (1024 * 1024);
+  if (sizeInMB > 5) {
+    console.warn(`⚠️ Sending large data: ${sizeInMB.toFixed(2)} MB`);
+  }
+  
+  try {
+    ws.send(jsonData);
+    console.log('📤 Sent to Python:', data.type);
+    return true;
+  } catch (error) {
+    console.error('❌ Error sending data:', error);
+    return false;
+  }
 }
 
 // Listen for messages from popup
@@ -187,23 +199,39 @@ async function takeScreenshot() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
-    // FIX: Ne pas passer windowId, juste les options
+    // Capture visible tab with JPEG format for smaller size
     const screenshot = await chrome.tabs.captureVisibleTab(null, {
         format: 'jpeg',
-        quality: 90
+        quality: 75
     });
     
     // Remove data URL prefix to get just base64
-    const base64Data = screenshot.replace(/^data:image\/png;base64,/, '');
+    const base64Data = screenshot.replace(/^data:image\/jpeg;base64,/, '');
     
     console.log(`✅ Screenshot captured (${base64Data.length} bytes)`);
     
-    sendToPython({
-      type: 'screenshot',
-      data: base64Data,
-      width: tab.width || 1280,
-      height: tab.height || 800
-    });
+    // Split large screenshots into chunks if necessary (WebSockets have message size limits)
+    const maxChunkSize = 5 * 1024 * 1024; // 5MB is a safe limit for most WebSockets
+    
+    if (base64Data.length < maxChunkSize) {
+      // Send screenshot in one piece
+      sendToPython({
+        type: 'screenshot',
+        data: base64Data,
+        width: tab.width || 1280,
+        height: tab.height || 800
+      });
+    } else {
+      console.warn(`⚠️ Large screenshot (${(base64Data.length / (1024 * 1024)).toFixed(2)}MB), will need to optimize in the backend`);
+      
+      // Send but log a warning - backend will handle resizing
+      sendToPython({
+        type: 'screenshot',
+        data: base64Data,
+        width: tab.width || 1280,
+        height: tab.height || 800
+      });
+    }
     
     return { success: true, data: 'Screenshot sent' };
   } catch (error) {
@@ -223,23 +251,96 @@ async function clickAt(x, y, button = 'left') {
       func: (x, y, button) => {
         let element = document.elementFromPoint(x, y);
         
-        // VISUAL DEBUG: Add red circle at click position
-        const marker = document.createElement('div');
-        marker.style.position = 'fixed';
-        marker.style.left = (x - 10) + 'px';
-        marker.style.top = (y - 10) + 'px';
-        marker.style.width = '20px';
-        marker.style.height = '20px';
-        marker.style.borderRadius = '50%';
-        marker.style.backgroundColor = 'red';
-        marker.style.border = '2px solid white';
-        marker.style.zIndex = '999999';
-        marker.style.pointerEvents = 'none';
-        document.body.appendChild(marker);
-        setTimeout(() => marker.remove(), 2000);
+        // ENHANCED VISUAL DEBUG: Add a much more visible click animation
+        function createClickAnimation() {
+          // Create container for the animation
+          const animContainer = document.createElement('div');
+          animContainer.style.position = 'fixed';
+          animContainer.style.left = (x - 50) + 'px';
+          animContainer.style.top = (y - 50) + 'px';
+          animContainer.style.width = '100px';
+          animContainer.style.height = '100px';
+          animContainer.style.pointerEvents = 'none';
+          animContainer.style.zIndex = '2147483647'; // Max z-index
+          
+          // Create ripple effect
+          const ripple = document.createElement('div');
+          ripple.style.position = 'absolute';
+          ripple.style.width = '30px';
+          ripple.style.height = '30px';
+          ripple.style.left = '35px';
+          ripple.style.top = '35px';
+          ripple.style.borderRadius = '50%';
+          ripple.style.backgroundColor = 'rgba(255, 0, 0, 0.6)';
+          ripple.style.boxShadow = '0 0 10px rgba(255, 0, 0, 0.8)';
+          ripple.style.animation = 'claude-click-ripple 1.5s ease-out';
+          
+          // Create a highlight spot
+          const spot = document.createElement('div');
+          spot.style.position = 'absolute';
+          spot.style.width = '10px';
+          spot.style.height = '10px';
+          spot.style.left = '45px';
+          spot.style.top = '45px';
+          spot.style.borderRadius = '50%';
+          spot.style.backgroundColor = 'rgba(255, 0, 0, 0.8)';
+          spot.style.boxShadow = '0 0 10px rgba(255, 0, 0, 1)';
+          
+          // Create coordinates text
+          const coordsText = document.createElement('div');
+          coordsText.textContent = `(${x}, ${y})`;
+          coordsText.style.position = 'absolute';
+          coordsText.style.width = '100px';
+          coordsText.style.textAlign = 'center';
+          coordsText.style.left = '0';
+          coordsText.style.top = '60px';
+          coordsText.style.color = 'white';
+          coordsText.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+          coordsText.style.padding = '2px';
+          coordsText.style.borderRadius = '3px';
+          coordsText.style.fontSize = '12px';
+          coordsText.style.fontFamily = 'monospace';
+          
+          // Add keyframes for the ripple animation
+          if (!document.getElementById('claude-click-animation-style')) {
+            const styleEl = document.createElement('style');
+            styleEl.id = 'claude-click-animation-style';
+            styleEl.textContent = `
+              @keyframes claude-click-ripple {
+                0% {
+                  transform: scale(0.3);
+                  opacity: 1;
+                }
+                100% {
+                  transform: scale(6);
+                  opacity: 0;
+                }
+              }
+            `;
+            document.head.appendChild(styleEl);
+          }
+          
+          // Assemble and append to document
+          animContainer.appendChild(ripple);
+          animContainer.appendChild(spot);
+          animContainer.appendChild(coordsText);
+          document.body.appendChild(animContainer);
+          
+          // Remove after animation completes
+          setTimeout(() => {
+            animContainer.remove();
+          }, 3000);
+        }
+        
+        // Create the animation
+        createClickAnimation();
         
         if (!element) {
-          return { success: false, error: 'No element found at coordinates' };
+          return { 
+            success: false, 
+            error: 'No element found at coordinates',
+            coordinates: { x, y }
+          };
         }
         
         // SMART CLICK: Find the closest clickable element
@@ -269,7 +370,8 @@ async function clickAt(x, y, button = 'left') {
             tag: element.tagName,
             id: element.id || 'no-id',
             class: element.className.toString().substring(0, 50) || 'no-class',
-            text: (element.innerText || element.textContent || 'no-text').substring(0, 50)
+            text: (element.innerText || element.textContent || 'no-text').substring(0, 50),
+            coordinates: { x, y }
           },
           clicked: {
             tag: clickableElement.tagName,
@@ -502,9 +604,58 @@ async function navigateToUrl(url) {
 
 async function moveMouse(x, y) {
   console.log(`🖱️ Moving mouse to (${x}, ${y})`);
-  // Note: Actual mouse movement not possible in browser
-  // This just tracks position for coordinate reference
-  return { success: true, data: { x, y } };
+  
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    
+    // Show visual indicator for mouse position
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (x, y) => {
+        // Create a cursor indicator
+        const cursor = document.createElement('div');
+        cursor.style.position = 'fixed';
+        cursor.style.left = (x - 10) + 'px';
+        cursor.style.top = (y - 10) + 'px';
+        cursor.style.width = '20px';
+        cursor.style.height = '20px';
+        cursor.style.borderRadius = '50%';
+        cursor.style.border = '2px solid rgba(100, 100, 255, 0.8)';
+        cursor.style.backgroundColor = 'rgba(100, 100, 255, 0.3)';
+        cursor.style.zIndex = '2147483646';
+        cursor.style.pointerEvents = 'none';
+        
+        // Add coordinates
+        const coords = document.createElement('div');
+        coords.textContent = `(${x},${y})`;
+        coords.style.position = 'fixed';
+        coords.style.left = (x + 10) + 'px';
+        coords.style.top = (y + 10) + 'px';
+        coords.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+        coords.style.color = 'white';
+        coords.style.padding = '2px 5px';
+        coords.style.borderRadius = '3px';
+        coords.style.fontSize = '11px';
+        coords.style.fontFamily = 'monospace';
+        coords.style.zIndex = '2147483646';
+        coords.style.pointerEvents = 'none';
+        
+        document.body.appendChild(cursor);
+        document.body.appendChild(coords);
+        
+        setTimeout(() => {
+          cursor.remove();
+          coords.remove();
+        }, 2000);
+      },
+      args: [x, y]
+    });
+    
+    return { success: true, data: { x, y } };
+  } catch (error) {
+    console.error('Mouse move error:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 async function switchTab(index) {

@@ -19,8 +19,15 @@ WEBSOCKET_PORT = 8765
 
 # Computer Use Configuration
 MAX_TOKENS = 4096
-SCREENSHOT_WIDTH = 1280  # Default screenshot width
-SCREENSHOT_HEIGHT = 800  # Default screenshot height
+
+# Screenshot Configuration
+# Real screenshot dimensions (will be detected at runtime)
+REAL_SCREENSHOT_WIDTH = 1280
+REAL_SCREENSHOT_HEIGHT = 800
+
+# Target XGA resolution for Claude (recommended by Anthropic)
+TARGET_SCREENSHOT_WIDTH = 1024
+TARGET_SCREENSHOT_HEIGHT = 768
 
 # Logging
 DEBUG = True
@@ -37,6 +44,6 @@ def validate_config():
         print("✅ ANTHROPIC_API_KEY found")
     
     print("✅ Configuration loaded successfully")
-    #print(f"   Model: {CLAUDE_MODEL}")
     print(f"   WebSocket: {WEBSOCKET_HOST}:{WEBSOCKET_PORT}")
+    print(f"   Target Resolution: {TARGET_SCREENSHOT_WIDTH}x{TARGET_SCREENSHOT_HEIGHT}")
     return True
