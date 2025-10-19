@@ -1,7 +1,3 @@
-"""
-Claude Orchestrator - Implements the Computer Use loop with Claude API
-This is the brain that uses Claude to understand tasks and decide actions
-"""
 import anthropic
 from typing import List, Dict, Any, Optional
 import base64
@@ -9,6 +5,12 @@ from PIL import Image
 import io
 import traceback
 import time
+import os
+import json
+from io import BytesIO
+import asyncio
+import time
+from PIL import Image, ImageDraw, ImageFont
 
 import config
 from chrome_adapter import ChromeAdapter
@@ -25,13 +27,26 @@ class ClaudeOrchestrator:
         self.real_height = config.REAL_SCREENSHOT_HEIGHT
         self.target_width = config.TARGET_SCREENSHOT_WIDTH
         self.target_height = config.TARGET_SCREENSHOT_HEIGHT
-        self.last_tool_use_id = None  # Track the last tool use ID
+        
+        # State tracking
+        self.action_history = []
+        self.last_action_type = None
+        self.repeated_action_count = 0
+        self.visited_urls = set()
+        self.typed_text = []
         
     async def execute_task(self, task: str):
         """Execute a task using Claude Computer Use"""
         print(f"\n{'='*60}")
         print(f"🎯 EXECUTING TASK: {task}")
         print(f"{'='*60}\n")
+        
+        # Reset state tracking
+        self.action_history = []
+        self.last_action_type = None
+        self.repeated_action_count = 0
+        self.visited_urls = set()
+        self.typed_text = []
         
         # Initialize conversation with the task
         self.messages = [
@@ -44,6 +59,7 @@ class ClaudeOrchestrator:
         # Computer Use loop
         max_iterations = 20
         iteration = 0
+        stuck_counter = 0
         
         while iteration < max_iterations:
             iteration += 1
@@ -52,33 +68,46 @@ class ClaudeOrchestrator:
             try:
                 # Get current screenshot
                 print("📸 Taking screenshot...")
+                #screenshot = await self.get_screenshot_with_dimensions()
                 screenshot = await self.chrome_adapter.get_screenshot()
+
+
                 
                 if not screenshot:
                     print("❌ Failed to get screenshot")
                     break
                 
-                # Check if screenshot is valid base64
-                try:
-                    # Basic sanity check for base64
-                    test_decode = base64.b64decode(screenshot)
-                except Exception as e:
-                    print(f"❌ Invalid base64 screenshot: {str(e)}")
-                    break
+                # Save initial screenshot (without coordinates)
+                self.save_debug_image(screenshot, None, iteration)
                 
-                # Resize screenshot to XGA resolution (1024x768)
-                try:
-                    resized_screenshot = self.resize_screenshot(screenshot)
-                except Exception as e:
-                    print(f"❌ Error resizing screenshot: {str(e)}")
-                    print(traceback.format_exc())
-                    # Use original screenshot as fallback
-                    print("Using original screenshot as fallback")
-                    resized_screenshot = screenshot
+                # Create context-aware message for Claude
+                context_message = self.create_context_message(task, iteration, stuck_counter)
                 
                 # Call Claude with Computer Use
                 print("🤖 Calling Claude API...")
-                response = await self.call_claude_with_screenshot(resized_screenshot)
+                
+                # Create message with screenshot
+                screenshot_message = {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": screenshot
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": context_message
+                        }
+                    ]
+                }
+                
+                # Call Claude API with messages and screenshot
+                current_messages = self.messages.copy() + [screenshot_message]
+                response = await self.call_claude_api(current_messages)
                 
                 # Check if task is complete
                 if response.stop_reason == "end_turn":
@@ -86,32 +115,76 @@ class ClaudeOrchestrator:
                     final_message = self.extract_final_message(response)
                     if final_message:
                         print(f"💬 Claude says: {final_message}")
+                    # Add Claude's final response to conversation history
+                    self.messages.append({"role": "assistant", "content": response.content})
                     break
                 
-                # Process tool uses
-                tool_uses = [
-                    block for block in response.content 
-                    if block.type == "tool_use"
-                ]
+                # Get tool uses from response
+                tool_uses = [block for block in response.content if block.type == "tool_use"]
                 
                 if not tool_uses:
-                    print("⚠️ No tool use found, ending...")
+                    print("⚠️ No tool use found in response")
+                    # Still add Claude's response to conversation history
+                    self.messages.append({"role": "assistant", "content": response.content})
                     break
                 
-                # Add response to messages
-                self.messages.append({
-                    "role": "assistant",
-                    "content": response.content
-                })
+                # Add Claude's response (with tool uses) to conversation history
+                self.messages.append({"role": "assistant", "content": response.content})
                 
-                # Execute each tool use
+
+                
+                # Process and execute each tool use
+                coordinates_used = []
+                tool_results = []
+                
                 for tool_use in tool_uses:
-                    self.last_tool_use_id = tool_use.id  # Store the tool use ID
-                    await self.execute_tool_use(tool_use)
+                    # Execute the action
+                    action_result = await self.execute_computer_action(
+                        tool_use.name, tool_use.input, coordinates_used
+                    )
+                    
+                    # Record action in history
+                    self.record_action(tool_use.name, tool_use.input, action_result)
+                    
+                    # Create tool result
+                    tool_result = {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": action_result
+                    }
+                    tool_results.append(tool_result)
+                
+                # Add tool results as a single message to conversation history
+                if tool_results:
+                    self.messages.append({
+                        "role": "user",
+                        "content": tool_results
+                    })
+                
+                # Save debug image with coordinates
+                if coordinates_used:
+                    print(f"🎯 Coordinates used in iteration {iteration}: {coordinates_used}")
+                    # Get a fresh screenshot to show the result of actions
+                    updated_screenshot = await self.chrome_adapter.get_screenshot()
+                    if updated_screenshot:
+                        self.save_debug_image(updated_screenshot, coordinates_used, iteration)
+                
+                # If we've been stuck for too many iterations, break
+                if stuck_counter >= 4:
+                    print("⚠️ Too many stuck cycles, giving up")
+                    break
                 
             except Exception as e:
                 print(f"❌ Error in iteration {iteration}: {e}")
+                import traceback
                 print(traceback.format_exc())
+                
+                # Try to recover from certain errors
+                if "ERR_CONNECTION_REFUSED" in str(e) or "WebSocket" in str(e):
+                    print("⚠️ Connection error, waiting to recover...")
+                    await asyncio.sleep(3)  # Wait for potential reconnection
+                    continue
+                
                 break
         
         if iteration >= max_iterations:
@@ -121,76 +194,68 @@ class ClaudeOrchestrator:
         print("Task execution finished")
         print(f"{'='*60}\n")
     
-    def resize_screenshot(self, screenshot_base64: str) -> str:
-        """Resize screenshot to XGA resolution (1024x768)"""
-        try:
-            # Decode base64 to bytes
-            img_bytes = base64.b64decode(screenshot_base64)
-            
-            # Create a BytesIO object from the bytes
-            img_buffer = io.BytesIO(img_bytes)
-            img_buffer.seek(0)
-            
-            # Open the image
-            img = Image.open(img_buffer)
-            
-            # Get original size
-            original_width, original_height = img.size
-            print(f"📐 Original screenshot size: {original_width}x{original_height}")
-            
-            # Update real dimensions for coordinate scaling
-            self.real_width = original_width
-            self.real_height = original_height
-            
-            # Resize to target resolution
-            resized_img = img.resize((self.target_width, self.target_height), Image.LANCZOS)
-            print(f"📐 Resized screenshot to: {self.target_width}x{self.target_height}")
-            
-            # Convert back to base64
-            buffer = io.BytesIO()
-            resized_img.save(buffer, format="JPEG", quality=75)
-            buffer.seek(0)
-            resized_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            
-            # Calculate compression ratio
-            original_size = len(screenshot_base64)
-            new_size = len(resized_base64)
-            ratio = (original_size / new_size) if new_size > 0 else 0
-            print(f"🗜️ Compression: {original_size/1024:.1f}KB → {new_size/1024:.1f}KB ({ratio:.1f}x)")
-            
-            return resized_base64
-            
-        except Exception as e:
-            print(f"❌ Error in resize_screenshot: {e}")
-            print(traceback.format_exc())
-            raise
+    def create_context_message(self, task, iteration, stuck_counter):
+        """Create a context-rich message for Claude"""
         
-    async def call_claude_with_screenshot(self, screenshot_base64: str):
-        """Call Claude API with Computer Use tool and screenshot"""
+        # Basic instruction
+        message = f"Here is the current state of the browser. "
         
-        # Build message with screenshot
-        user_message = {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": screenshot_base64
-                    }
-                },
-                {
-                    "type": "text",
-                    "text": "Here is the current state of the browser. What should I do next?"
-                }
-            ]
-        }
+        # Add task reminder
+        message += f"Your task is to: {task}. "
         
-        # Add to conversation
-        messages = self.messages.copy()
-        messages.append(user_message)
+        # Add iteration count
+        message += f"This is iteration {iteration}. "
+        
+        # Add history summary if we have some
+        if self.action_history:
+            message += f"\n\nSo far, you have performed these actions:"
+            
+            # Only include the last 5 actions to avoid making the message too long
+            recent_actions = self.action_history[-5:]
+            for i, action in enumerate(recent_actions):
+                message += f"\n{len(self.action_history) - len(recent_actions) + i + 1}. {action}"
+        
+        # Add more context if stuck
+        if stuck_counter > 0:
+            message += f"\n\nNOTE: You appear to be repeating similar actions without progress. "
+    
+        
+        return message
+    
 
+    
+    def record_action(self, tool_name, tool_input, result):
+        """Record action in history for context tracking"""
+        if tool_name != "computer":
+            return
+            
+        action = tool_input.get("action", "unknown")
+        
+        if action == "left_click":
+            coords = tool_input.get("coordinate", [0, 0])
+            self.action_history.append(f"Clicked at ({coords[0]}, {coords[1]})")
+            
+        elif action == "right_click":
+            coords = tool_input.get("coordinate", [0, 0])
+            self.action_history.append(f"Right-clicked at ({coords[0]}, {coords[1]})")
+            
+        elif action == "type":
+            text = tool_input.get("text", "")
+            self.action_history.append(f"Typed: '{text}'")
+            self.typed_text.append(text)
+            
+        elif action == "key":
+            key = tool_input.get("text", "")
+            self.action_history.append(f"Pressed key: {key}")
+            
+        elif action == "navigate":
+            url = tool_input.get("url", "")
+            self.action_history.append(f"Navigated to: {url}")
+            self.visited_urls.add(url)
+ 
+    
+    async def call_claude_api(self, messages):
+        """Call Claude API with proper error handling and retries"""
         try:
             # Add exponential backoff for API calls
             max_retries = 3
@@ -198,28 +263,27 @@ class ClaudeOrchestrator:
             
             for retry in range(max_retries):
                 try:
+                    # Call Claude API
                     thinking = {"type": "enabled", "budget_tokens": 1025}
                     response = self.client.beta.messages.create(
-                            model="claude-haiku-4-5",  # or another compatible model
-                            max_tokens=1026,
-                            tools=[
-                                {
+                        model="claude-haiku-4-5",
+                        max_tokens=1026,
+                        tools=[
+                            {
                                 "type": "computer_20250124",
                                 "name": "computer",
                                 "display_width_px": self.target_width,
                                 "display_height_px": self.target_height,
                                 "display_number": 1,
-                                }
-                            ],
-                            messages=messages,
-                            betas=["computer-use-2025-01-24"],
-                            thinking=thinking
-                            
-                        )
-                    #print thr the response for debugging
-                    print(response.thinking)
-
+                            }
+                        ],
+                        messages=messages,
+                        betas=["computer-use-2025-01-24"],
+                        thinking=thinking
+                    )
+                    
                     return response
+                    
                 except anthropic.APIError as api_error:
                     # Only retry on certain error types
                     if retry < max_retries - 1 and (
@@ -231,45 +295,146 @@ class ClaudeOrchestrator:
                         time.sleep(wait_time)
                     else:
                         # Don't retry for client errors like 400
+                        print(f"❌ API error: {api_error}")
                         raise
             
         except Exception as e:
             print(f"❌ Error calling Claude API: {e}")
+            import traceback
             print(traceback.format_exc())
             raise
-        
-    async def execute_tool_use(self, tool_use):
-        """Execute a tool use from Claude"""
-        tool_name = tool_use.name
-        tool_input = tool_use.input
-        
-        print(f"\n🔧 Tool: {tool_name}")
-        print(f"   Input: {tool_input}")
-        print(f"   Tool ID: {tool_use.id}")
+    
+    async def execute_computer_action(self, tool_name, tool_input, coordinates_list=None):
+        """Execute a computer action and track coordinates"""
         
         if tool_name != "computer":
-            print(f"⚠️ Unknown tool: {tool_name}")
-            return
+            return f"Unknown tool: {tool_name}"
         
         # Extract action and parameters
         action = tool_input.get("action")
         
-        # Execute the action
-        result = await self.execute_computer_action(action, tool_input)
+        # Track coordinates for debug visualization
+        if coordinates_list is not None and action in ["left_click", "right_click", "double_click", "mouse_move"]:
+            if "coordinate" in tool_input:
+                x, y = tool_input.get("coordinate", [0, 0])
+                coordinates_list.append((x, y))
+                print(f"📍 Debug: Tracking coordinate ({x}, {y}) for {action}")
         
-        # Add tool result to messages
-        tool_result = {
-            "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,  # Use the exact ID from the tool use
-                    "content": str(result)
-                }
-            ]
-        }
-        
-        self.messages.append(tool_result)
+        # Apply smart action selection
+        try:
+            if self.repeated_action_count >= 2 and action in ["left_click", "right_click"]:
+                # If repeating clicks, try to vary the coordinates slightly
+                if "coordinate" in tool_input:
+                    x, y = tool_input.get("coordinate", [0, 0])
+                    # Add slight variation to avoid exact same spot
+                    x_offset = (self.repeated_action_count * 5) % 15
+                    y_offset = (self.repeated_action_count * 3) % 10
+                    x += x_offset - 7  # -7 to +7 range
+                    y += y_offset - 7  # -5 to +5 range
+                    tool_input["coordinate"] = [x, y]
+                    print(f"🔄 Varying coordinates to avoid loop: ({x}, {y})")
+            
+            if action == "screenshot":
+                await self.chrome_adapter.get_screenshot()
+                return "Screenshot taken"
+                
+            elif action == "mouse_move":
+                model_x, model_y = tool_input.get("coordinate", [0, 0])
+                real_x, real_y = self.scale_coordinates(model_x, model_y)
+                await self.chrome_adapter.mouse_move(real_x, real_y)
+                return f"Moved mouse to ({real_x}, {real_y})"
+                
+            elif action == "left_click":
+                model_x, model_y = tool_input.get("coordinate", [0, 0])
+                real_x, real_y = self.scale_coordinates(model_x, model_y)
+                
+                # Enhanced click with fallbacks
+                result = await self.enhanced_click(real_x, real_y, "left")
+                return result
+                
+            elif action == "right_click":
+                model_x, model_y = tool_input.get("coordinate", [0, 0])
+                real_x, real_y = self.scale_coordinates(model_x, model_y)
+                await self.chrome_adapter.click(real_x, real_y, "right")
+                return f"Right-clicked at ({real_x}, {real_y})"
+                
+            elif action == "double_click":
+                model_x, model_y = tool_input.get("coordinate", [0, 0])
+                real_x, real_y = self.scale_coordinates(model_x, model_y)
+                await self.chrome_adapter.click(real_x, real_y, "left")
+                await asyncio.sleep(0.1)  # Small delay between clicks
+                await self.chrome_adapter.click(real_x, real_y, "left")
+                return f"Double-clicked at ({real_x}, {real_y})"
+                
+            elif action == "type":
+                text = tool_input.get("text", "")
+                await self.chrome_adapter.type_text(text)
+                return f"Typed: {text}"
+                
+            elif action == "key":
+                key = tool_input.get("text", "")
+                await self.chrome_adapter.key_press(key)
+                return f"Pressed key: {key}"
+            
+            elif action == "navigate":
+                url = tool_input.get("url", "")
+                # Ensure URL has protocol
+                if not url.startswith(("http://", "https://")):
+                    url = "https://" + url
+                await self.chrome_adapter.navigate(url)
+                return f"Navigated to: {url}"
+                
+            else:
+                return f"Unknown action: {action}"
+                
+        except Exception as e:
+            error_msg = f"Error executing {action}: {str(e)}"
+            print(f"❌ {error_msg}")
+            import traceback
+            print(traceback.format_exc())
+            return error_msg
+    
+    async def enhanced_click(self, x, y, button="left"):
+        """Enhanced click with better error handling and element identification"""
+        try:
+            # First attempt - regular click
+            result = await self.chrome_adapter.click(x, y, button)
+            
+            if not result.get("success", False):
+                # If click failed, try to get information about failure
+                error_info = result.get("error", "Unknown error")
+                print(f"⚠️ Click failed: {error_info}")
+                
+                # Try clicking with offset for potential interface elements
+                for offset in [(0, -9), (0, 9), (-9, 0), (9, 0), (5, 0)]:
+                    print(f"🔄 Retrying click with offset {offset}")
+                    retry_result = await self.chrome_adapter.click(
+                        x + offset[0], y + offset[1], button
+                    )
+                    if retry_result.get("success", False):
+                        return f"Clicked at ({x + offset[0]}, {y + offset[1]}) after retry with offset"
+                
+                return f"Click attempt failed at ({x}, {y})"
+            
+            # Check if clicked element was actually interactable
+            element_info = result.get("data", {}).get("elementInfo", {})
+            element_tag = element_info.get("clicked", {}).get("tag", "").lower()
+            is_clickable = element_info.get("clicked", {}).get("isClickable", False)
+            
+            # If we clicked on a non-interactable element, log warning
+            if not is_clickable:
+                print(f"⚠️ Clicked on non-interactable element: {element_tag}")
+                if self.repeated_action_count >= 1:
+                    # After repeated non-interactable clicks, try pressing Tab
+                    print("🔄 Pressing Tab to focus on next interactive element")
+                    await self.chrome_adapter.key_press("Tab")
+                    return f"Clicked at ({x}, {y}) on non-interactable element, followed by Tab key"
+            
+            return f"Clicked at ({x}, {y})"
+            
+        except Exception as e:
+            print(f"❌ Enhanced click error: {e}")
+            return f"Error during click operation: {str(e)}"
     
     def scale_coordinates(self, x: int, y: int) -> tuple:
         """Scale coordinates from model resolution to real screen resolution"""
@@ -278,58 +443,6 @@ class ClaudeOrchestrator:
         
         print(f"🔍 Scaling coordinates: ({x},{y}) → ({real_x},{real_y})")
         return (real_x, real_y)
-        
-    async def execute_computer_action(self, action: str, params: Dict) -> str:
-        """Execute a computer action via Chrome Adapter"""
-        
-        try:
-            if action == "screenshot":
-                screenshot = await self.chrome_adapter.get_screenshot()
-                return "Screenshot taken"
-                
-            elif action == "mouse_move":
-                model_x, model_y = params.get("coordinate", [0, 0])
-                real_x, real_y = self.scale_coordinates(model_x, model_y)
-                await self.chrome_adapter.mouse_move(real_x, real_y)
-                return f"Moved mouse to ({real_x}, {real_y})"
-                
-            elif action == "left_click":
-                model_x, model_y = params.get("coordinate", [0, 0])
-                real_x, real_y = self.scale_coordinates(model_x, model_y)
-                await self.chrome_adapter.click(real_x, real_y, "left")
-                return f"Clicked at ({real_x}, {real_y})"
-                
-            elif action == "right_click":
-                model_x, model_y = params.get("coordinate", [0, 0])
-                real_x, real_y = self.scale_coordinates(model_x, model_y)
-                await self.chrome_adapter.click(real_x, real_y, "right")
-                return f"Right-clicked at ({real_x}, {real_y})"
-                
-            elif action == "double_click":
-                model_x, model_y = params.get("coordinate", [0, 0])
-                real_x, real_y = self.scale_coordinates(model_x, model_y)
-                await self.chrome_adapter.click(real_x, real_y, "left")
-                await self.chrome_adapter.click(real_x, real_y, "left")
-                return f"Double-clicked at ({real_x}, {real_y})"
-                
-            elif action == "type":
-                text = params.get("text", "")
-                await self.chrome_adapter.type_text(text)
-                return f"Typed: {text}"
-                
-            elif action == "key":
-                key = params.get("text", "")
-                await self.chrome_adapter.key_press(key)
-                return f"Pressed key: {key}"
-                
-            else:
-                return f"Unknown action: {action}"
-                
-        except Exception as e:
-            error_msg = f"Error executing {action}: {str(e)}"
-            print(f"❌ {error_msg}")
-            print(traceback.format_exc())
-            return error_msg
             
     def extract_final_message(self, response) -> str:
         """Extract final text message from Claude response"""
@@ -337,3 +450,101 @@ class ClaudeOrchestrator:
             if block.type == "text":
                 return block.text
         return ""
+    
+    def save_debug_image(self, screenshot_base64: str, coordinates=None, iteration=0):
+        """
+        Save the screenshot with coordinates marked for debugging purposes.
+        
+        Args:
+            screenshot_base64: Base64 encoded screenshot
+            coordinates: List of (x, y) coordinates to mark on the image
+            iteration: Current iteration number for filename
+        """
+        try:
+            # Create debug directory if it doesn't exist
+            debug_dir = os.path.join(os.path.dirname(__file__), "debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            # Decode base64 image
+            image_data = base64.b64decode(screenshot_base64)
+            image = Image.open(BytesIO(image_data))
+            
+            # Draw coordinates on image if provided
+            if coordinates and len(coordinates) > 0:
+                draw = ImageDraw.Draw(image)
+                
+                # Try to load a font, use default if not available
+                try:
+                    font = ImageFont.truetype("arial.ttf", 20)
+                except IOError:
+                    font = ImageFont.load_default()
+                
+                # Draw each coordinate
+                for i, (x, y) in enumerate(coordinates):
+                    # Draw a red circle at the coordinate
+                    draw.ellipse((x-10, y-10, x+10, y+10), outline=(255, 0, 0), width=3)
+                    
+                    # Draw a cross at the coordinate
+                    draw.line((x-15, y, x+15, y), fill=(255, 0, 0), width=3)
+                    draw.line((x, y-15, x, y+15), fill=(255, 0, 0), width=3)
+                    
+                    # Calculate scaled coordinates
+                    real_x, real_y = self.scale_coordinates(x, y)
+                    
+                    # Add text label with both original and scaled coordinates
+                    draw.text((x+15, y+15), f"Claude: ({x}, {y})\nScaled: ({real_x}, {real_y})", 
+                            fill=(255, 0, 0), font=font)
+            
+            # Save the image
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(debug_dir, f"iter_{iteration:02d}_{timestamp}.jpg")
+            image.save(filename, "JPEG", quality=95)
+            print(f"✅ Debug image saved: {filename}")
+            
+            # Save coordinates to text file
+            if coordinates and len(coordinates) > 0:
+                coords_file = os.path.join(debug_dir, f"iter_{iteration:02d}_{timestamp}_coords.txt")
+                with open(coords_file, "w") as f:
+                    for i, (x, y) in enumerate(coordinates):
+                        real_x, real_y = self.scale_coordinates(x, y)
+                        f.write(f"Coordinate {i+1}: Claude: ({x}, {y}) → Scaled: ({real_x}, {real_y})\n")
+                print(f"✅ Coordinates saved: {coords_file}")
+                
+        except Exception as e:
+            print(f"❌ Error saving debug image: {e}")
+            import traceback
+            print(traceback.format_exc())
+
+
+    async def get_screenshot_with_dimensions(self):
+        """Get screenshot and update real dimensions based on actual screenshot size"""
+        try:
+            # Get screenshot from adapter
+            screenshot = await self.chrome_adapter.get_screenshot()
+            
+            if not screenshot:
+                print("❌ Failed to get screenshot")
+                return None
+                
+            # Update dimensions based on actual screenshot
+            try:
+                # Decode base64 to bytes
+                image_data = base64.b64decode(screenshot)
+                
+                # Open image to get dimensions
+                with Image.open(BytesIO(image_data)) as img:
+                    width, height = img.size
+                    
+                    # Update real dimensions
+                    if width != self.real_width or height != self.real_height:
+                        print(f"📐 Updated screenshot dimensions: {width}x{height} (was {self.real_width}x{self.real_height})")
+                        self.real_width = width
+                        self.real_height = height
+            except Exception as e:
+                print(f"⚠️ Could not update dimensions from screenshot: {e}")
+                
+            return screenshot
+            
+        except Exception as e:
+            print(f"❌ Error getting screenshot: {e}")
+            return None

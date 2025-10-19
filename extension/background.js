@@ -197,6 +197,7 @@ async function takeScreenshot() {
   console.log('📸 Taking screenshot...');
   
   try {
+    const dimensions = await debugDimensions();
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
     // Capture visible tab with JPEG format for smaller size
@@ -246,221 +247,254 @@ async function clickAt(x, y, button = 'left') {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
-    const result = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: (x, y, button) => {
-        let element = document.elementFromPoint(x, y);
-        
-        // ENHANCED VISUAL DEBUG: Add a much more visible click animation
-        function createClickAnimation() {
-          // Create container for the animation
-          const animContainer = document.createElement('div');
-          animContainer.style.position = 'fixed';
-          animContainer.style.left = (x - 50) + 'px';
-          animContainer.style.top = (y - 50) + 'px';
-          animContainer.style.width = '100px';
-          animContainer.style.height = '100px';
-          animContainer.style.pointerEvents = 'none';
-          animContainer.style.zIndex = '2147483647'; // Max z-index
+    // First check if we're on a special URL that can't be accessed
+    if (tab.url.startsWith("chrome://") || 
+        tab.url.startsWith("devtools://") || 
+        tab.url.startsWith("chrome-extension://")) {
+      console.warn(`⚠️ Cannot interact with restricted page: ${tab.url}`);
+      return { 
+        success: false, 
+        error: `Cannot interact with restricted URL: ${tab.url}`,
+        data: { url: tab.url }
+      };
+    }
+    
+    // Execute the click script with error handling
+    try {
+      const result = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (x, y, button) => {
+          // VISUAL DEBUG: Add red circle at click position
+          const marker = document.createElement('div');
+          marker.style.position = 'fixed';
+          marker.style.left = (x - 10) + 'px';
+          marker.style.top = (y - 10) + 'px';
+          marker.style.width = '20px';
+          marker.style.height = '20px';
+          marker.style.borderRadius = '50%';
+          marker.style.backgroundColor = 'red';
+          marker.style.border = '2px solid white';
+          marker.style.zIndex = '999999';
+          marker.style.pointerEvents = 'none';
+          document.body.appendChild(marker);
+          setTimeout(() => marker.remove(), 2000);
           
-          // Create ripple effect
-          const ripple = document.createElement('div');
-          ripple.style.position = 'absolute';
-          ripple.style.width = '30px';
-          ripple.style.height = '30px';
-          ripple.style.left = '35px';
-          ripple.style.top = '35px';
-          ripple.style.borderRadius = '50%';
-          ripple.style.backgroundColor = 'rgba(255, 0, 0, 0.6)';
-          ripple.style.boxShadow = '0 0 10px rgba(255, 0, 0, 0.8)';
-          ripple.style.animation = 'claude-click-ripple 1.5s ease-out';
+          // Find element at coordinates
+          let element = document.elementFromPoint(x, y);
           
-          // Create a highlight spot
-          const spot = document.createElement('div');
-          spot.style.position = 'absolute';
-          spot.style.width = '10px';
-          spot.style.height = '10px';
-          spot.style.left = '45px';
-          spot.style.top = '45px';
-          spot.style.borderRadius = '50%';
-          spot.style.backgroundColor = 'rgba(255, 0, 0, 0.8)';
-          spot.style.boxShadow = '0 0 10px rgba(255, 0, 0, 1)';
-          
-          // Create coordinates text
-          const coordsText = document.createElement('div');
-          coordsText.textContent = `(${x}, ${y})`;
-          coordsText.style.position = 'absolute';
-          coordsText.style.width = '100px';
-          coordsText.style.textAlign = 'center';
-          coordsText.style.left = '0';
-          coordsText.style.top = '60px';
-          coordsText.style.color = 'white';
-          coordsText.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
-          coordsText.style.padding = '2px';
-          coordsText.style.borderRadius = '3px';
-          coordsText.style.fontSize = '12px';
-          coordsText.style.fontFamily = 'monospace';
-          
-          // Add keyframes for the ripple animation
-          if (!document.getElementById('claude-click-animation-style')) {
-            const styleEl = document.createElement('style');
-            styleEl.id = 'claude-click-animation-style';
-            styleEl.textContent = `
-              @keyframes claude-click-ripple {
-                0% {
-                  transform: scale(0.3);
-                  opacity: 1;
-                }
-                100% {
-                  transform: scale(6);
-                  opacity: 0;
-                }
-              }
-            `;
-            document.head.appendChild(styleEl);
+          if (!element) {
+            console.warn("No element found at coordinates");
+            return { 
+              success: false, 
+              error: 'No element found at coordinates',
+              coordinates: {x, y}
+            };
           }
           
-          // Assemble and append to document
-          animContainer.appendChild(ripple);
-          animContainer.appendChild(spot);
-          animContainer.appendChild(coordsText);
-          document.body.appendChild(animContainer);
-          
-          // Remove after animation completes
-          setTimeout(() => {
-            animContainer.remove();
-          }, 3000);
-        }
-        
-        // Create the animation
-        createClickAnimation();
-        
-        if (!element) {
-          return { 
-            success: false, 
-            error: 'No element found at coordinates',
-            coordinates: { x, y }
+          // IMPROVED ELEMENT SELECTION LOGIC
+          // Collect information about original element
+          const elementInfo = {
+            original: {
+              tag: element.tagName,
+              id: element.id || 'no-id',
+              class: element.className.toString().substring(0, 50) || 'no-class',
+              text: (element.innerText || element.textContent || 'no-text').substring(0, 50),
+              coordinates: {x, y}
+            }
           };
-        }
-        
-        // SMART CLICK: Find the closest clickable element
-        let clickableElement = element;
-        let depth = 0;
-        const maxDepth = 5;
-        
-        // Check if element itself is clickable
-        const isClickable = (el) => {
-          return el.onclick !== null || 
-                 el.tagName === 'A' || 
-                 el.tagName === 'BUTTON' ||
-                 el.getAttribute('role') === 'button' ||
-                 el.hasAttribute('onclick') ||
-                 el.style.cursor === 'pointer';
-        };
-        
-        // Walk up the DOM tree to find clickable parent
-        while (!isClickable(clickableElement) && depth < maxDepth && clickableElement.parentElement) {
-          clickableElement = clickableElement.parentElement;
-          depth++;
-        }
-        
-        // Get element info
-        const elementInfo = {
-          original: {
-            tag: element.tagName,
-            id: element.id || 'no-id',
-            class: element.className.toString().substring(0, 50) || 'no-class',
-            text: (element.innerText || element.textContent || 'no-text').substring(0, 50),
-            coordinates: { x, y }
-          },
-          clicked: {
+          
+          // Priority click logic
+          const isPriorityClickable = (el) => {
+            return el.tagName === 'INPUT' || 
+                   el.tagName === 'TEXTAREA' ||
+                   el.tagName === 'SELECT' ||
+                   el.tagName === 'BUTTON' ||
+                   el.tagName === 'A' ||
+                   el.getAttribute('role') === 'button';
+          };
+          
+          // Check if element itself is inherently interactive
+          if (isPriorityClickable(element)) {
+            console.log("🎯 Found priority clickable element:", element.tagName);
+            
+            // Focus if it's an input
+            if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA') {
+              element.focus();
+            }
+            
+            // Element info for clicked element
+            elementInfo.clicked = {
+              tag: element.tagName,
+              id: element.id || 'no-id',
+              class: element.className.toString().substring(0, 50) || 'no-class',
+              text: (element.innerText || element.textContent || 'no-text').substring(0, 30),
+              isClickable: true,
+              depth: 0,
+              priority: true
+            };
+            
+            // Perform click on the element
+            element.click();
+            
+            // For links
+            if (element.tagName === 'A' && element.href) {
+              return { 
+                success: true, 
+                elementInfo, 
+                isLink: true, 
+                href: element.href 
+              };
+            }
+            
+            return { success: true, elementInfo, priority: true };
+          }
+          
+          // Fallback: Check if element has click handlers
+          const hasClickHandler = (el) => {
+            return el.onclick !== null || 
+                   el.hasAttribute('onclick') ||
+                   el.style.cursor === 'pointer';
+          };
+          
+          if (hasClickHandler(element)) {
+            console.log("🎯 Found element with click handler");
+            
+            // Element info for clicked element
+            elementInfo.clicked = {
+              tag: element.tagName,
+              id: element.id || 'no-id',
+              class: element.className.toString().substring(0, 50) || 'no-class',
+              text: (element.innerText || element.textContent || 'no-text').substring(0, 30),
+              isClickable: true,
+              depth: 0
+            };
+            
+            // Perform click on the element
+            element.click();
+            return { success: true, elementInfo };
+          }
+          
+          // Last resort: Walk up the DOM tree (but limit depth)
+          let clickableElement = element;
+          let depth = 0;
+          const maxDepth = 3; // Reduced from 5 to avoid going too far up
+          
+          // Walk up the DOM tree to find clickable parent
+          while (!isPriorityClickable(clickableElement) && 
+                 !hasClickHandler(clickableElement) && 
+                 depth < maxDepth && 
+                 clickableElement.parentElement) {
+            clickableElement = clickableElement.parentElement;
+            depth++;
+          }
+          
+          // Get element info for clicked element
+          elementInfo.clicked = {
             tag: clickableElement.tagName,
             id: clickableElement.id || 'no-id',
             class: clickableElement.className.toString().substring(0, 50) || 'no-class',
             text: (clickableElement.innerText || clickableElement.textContent || 'no-text').substring(0, 30),
-            isClickable: isClickable(clickableElement),
+            isClickable: isPriorityClickable(clickableElement) || hasClickHandler(clickableElement),
             depth: depth
-          }
-        };
-        
-        // Focus if it's an input
-        if (clickableElement.tagName === 'INPUT' || clickableElement.tagName === 'TEXTAREA') {
-          clickableElement.focus();
-        }
-        
-        // Perform clicks with multiple methods
-        // Method 1: MouseEvent on clickable element
-        const clickEvent = new MouseEvent('click', {
-          view: window,
-          bubbles: true,
-          cancelable: true,
-          clientX: x,
-          clientY: y,
-          button: button === 'right' ? 2 : button === 'middle' ? 1 : 0
-        });
-        clickableElement.dispatchEvent(clickEvent);
-        
-        // Method 2: Native click
-        clickableElement.click();
-        
-        // Method 3: mousedown + mouseup (more reliable for some sites)
-        const mousedown = new MouseEvent('mousedown', {
-          view: window,
-          bubbles: true,
-          cancelable: true,
-          clientX: x,
-          clientY: y
-        });
-        const mouseup = new MouseEvent('mouseup', {
-          view: window,
-          bubbles: true,
-          cancelable: true,
-          clientX: x,
-          clientY: y
-        });
-        clickableElement.dispatchEvent(mousedown);
-        clickableElement.dispatchEvent(mouseup);
-        
-        // For links
-        if (clickableElement.tagName === 'A' && clickableElement.href) {
-          return { 
-            success: true, 
-            elementInfo, 
-            isLink: true, 
-            href: clickableElement.href 
           };
-        }
-        
-        return { success: true, elementInfo };
-      },
-      args: [x, y, button]
-    });
-    
-    const scriptResult = result[0]?.result;
-    
-    // Log detailed info
-    if (scriptResult?.elementInfo) {
-      console.log('📍 Original element:', scriptResult.elementInfo.original);
-      console.log('🎯 Clicked element:', scriptResult.elementInfo.clicked);
+          
+          // Focus if it's an input
+          if (clickableElement.tagName === 'INPUT' || clickableElement.tagName === 'TEXTAREA') {
+            clickableElement.focus();
+          }
+          
+          // Perform clicks with multiple methods
+          try {
+            // Method 1: MouseEvent on clickable element
+            const clickEvent = new MouseEvent('click', {
+              view: window,
+              bubbles: true,
+              cancelable: true,
+              clientX: x,
+              clientY: y,
+              button: button === 'right' ? 2 : button === 'middle' ? 1 : 0
+            });
+            clickableElement.dispatchEvent(clickEvent);
+            
+            // Method 2: Native click
+            clickableElement.click();
+            
+            // Method 3: mousedown + mouseup (more reliable for some sites)
+            const mousedown = new MouseEvent('mousedown', {
+              view: window,
+              bubbles: true,
+              cancelable: true,
+              clientX: x,
+              clientY: y
+            });
+            const mouseup = new MouseEvent('mouseup', {
+              view: window,
+              bubbles: true,
+              cancelable: true,
+              clientX: x,
+              clientY: y
+            });
+            clickableElement.dispatchEvent(mousedown);
+            clickableElement.dispatchEvent(mouseup);
+            
+            // For links
+            if (clickableElement.tagName === 'A' && clickableElement.href) {
+              return { 
+                success: true, 
+                elementInfo, 
+                isLink: true, 
+                href: clickableElement.href 
+              };
+            }
+            
+            return { success: true, elementInfo };
+          } catch (clickError) {
+            console.error("Error during click operation:", clickError);
+            return { 
+              success: false, 
+              error: clickError.toString(),
+              elementInfo
+            };
+          }
+        },
+        args: [x, y, button]
+      });
       
-      if (scriptResult.elementInfo.clicked.depth > 0) {
-        console.log(`   ↑ Walked up ${scriptResult.elementInfo.clicked.depth} levels to find clickable element`);
+      const scriptResult = result[0]?.result;
+      
+      // Log detailed info
+      if (scriptResult?.elementInfo) {
+        console.log('📍 Original element:', scriptResult.elementInfo.original);
+        console.log('🎯 Clicked element:', scriptResult.elementInfo.clicked);
+        
+        if (scriptResult.elementInfo.clicked.depth > 0) {
+          console.log(`   ↑ Walked up ${scriptResult.elementInfo.clicked.depth} levels to find clickable element`);
+        }
       }
+      
+      if (scriptResult?.isLink) {
+        console.log('🔗 Link clicked:', scriptResult.href);
+      }
+      
+      console.log('✅ Click result:', scriptResult?.success);
+      return scriptResult || { success: false, error: 'No result from script' };
+      
+    } catch (scriptError) {
+      console.error('❌ Script execution error:', scriptError);
+      return { 
+        success: false, 
+        error: `Script execution failed: ${scriptError.message}`
+      };
     }
-    
-    if (scriptResult?.isLink) {
-      console.log('🔗 Link clicked:', scriptResult.href);
-    }
-    
-    console.log('✅ Click result:', scriptResult?.success);
-    return scriptResult || { success: true };
     
   } catch (error) {
     console.error('❌ Click error:', error);
-    return { success: false, error: error.message };
+    return { 
+      success: false, 
+      error: `Click operation failed: ${error.message}`
+    };
   }
 }
-
 async function typeText(text) {
   console.log(`⌨️ Typing: "${text}"`);
   
@@ -687,6 +721,44 @@ async function downloadFile(url) {
     return { success: false, error: error.message };
   }
 }
+// Simple function to print browser dimensions to console
+async function debugDimensions() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    
+    if (!tab) {
+      console.error('❌ No active tab found');
+      return;
+    }
+    
+    const result = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const info = {
+          // Window size
+          windowInner: { width: window.innerWidth, height: window.innerHeight },
+          // Device pixel ratio (critical for scaling)
+          devicePixelRatio: window.devicePixelRatio,
+          // Document size
+          documentSize: { 
+            width: document.documentElement.clientWidth,
+            height: document.documentElement.clientHeight
+          }
+        };
+        
+        console.table(info); // This creates a nice table in console
+        return info;
+      }
+    });
+    
+    // Log the results in the extension console too
+    console.log('📏 Browser dimensions:', result[0].result);
+    
+  } catch (error) {
+    console.error('❌ Error getting dimensions:', error);
+  }
+}
+
 
 // Auto-connect on startup
 chrome.runtime.onStartup.addListener(() => {
@@ -700,5 +772,7 @@ chrome.runtime.onInstalled.addListener((details) => {
   connectToPython();
 });
 
+
 // Try to connect immediately
 connectToPython();
+

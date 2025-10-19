@@ -19,15 +19,16 @@ WEBSOCKET_PORT = 8765
 
 # Computer Use Configuration
 MAX_TOKENS = 4096
-
 # Screenshot Configuration
 # Real screenshot dimensions (will be detected at runtime)
-REAL_SCREENSHOT_WIDTH = 1280
-REAL_SCREENSHOT_HEIGHT = 800
+REAL_SCREENSHOT_WIDTH = 1470  # Logical pixels from window.innerWidth
+REAL_SCREENSHOT_HEIGHT = 797  # Logical pixels from window.innerHeight
 
 # Target XGA resolution for Claude (recommended by Anthropic)
 TARGET_SCREENSHOT_WIDTH = 1024
 TARGET_SCREENSHOT_HEIGHT = 768
+
+
 
 # Logging
 DEBUG = True
