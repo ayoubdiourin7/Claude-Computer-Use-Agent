@@ -1,19 +1,21 @@
-import anthropic
-from typing import List, Dict, Any, Optional
+
+# Add this at the top of claude_orchestrator.py where the other imports are
 import base64
-from PIL import Image
-import io
-import traceback
+from typing import List, Dict, Any, Optional
+import asyncio  # Make sure asyncio is imported
 import time
 import os
 import json
-from io import BytesIO
-import asyncio
-import time
-from PIL import Image, ImageDraw, ImageFont
+import traceback
 
+# Fix PIL imports - make sure to import ImageDraw specifically
+from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
+import anthropic
 import config
 from chrome_adapter import ChromeAdapter
+
+    
 
 
 class ClaudeOrchestrator:
@@ -64,14 +66,12 @@ class ClaudeOrchestrator:
         while iteration < max_iterations:
             iteration += 1
             print(f"\n--- Iteration {iteration} ---")
+            current_coordinates = []  # Track coordinates for current iteration
             
             try:
                 # Get current screenshot
                 print("📸 Taking screenshot...")
-                #screenshot = await self.get_screenshot_with_dimensions()
                 screenshot = await self.chrome_adapter.get_screenshot()
-
-
                 
                 if not screenshot:
                     print("❌ Failed to get screenshot")
@@ -131,7 +131,7 @@ class ClaudeOrchestrator:
                 # Add Claude's response (with tool uses) to conversation history
                 self.messages.append({"role": "assistant", "content": response.content})
                 
-
+               
                 
                 # Process and execute each tool use
                 coordinates_used = []
@@ -218,11 +218,48 @@ class ClaudeOrchestrator:
         # Add more context if stuck
         if stuck_counter > 0:
             message += f"\n\nNOTE: You appear to be repeating similar actions without progress. "
-    
+            
+            if stuck_counter == 1:
+                message += "Try a different approach such as:"
+                message += "\n- Directly navigate to a URL using left_click on the address bar and typing"
+                message += "\n- If trying to search, make sure to type in the search box and press Enter"
+                message += "\n- Look for alternative UI elements to interact with"
+            
+            elif stuck_counter >= 2:
+                message += "IMPORTANT: You're still stuck. Try a completely different approach:"
+                message += f"\n- Direct URL navigation: Type 'facebook.com' in the address bar"
+                message += f"\n- Use key presses like 'Tab' to move between elements"
+                message += f"\n- Check if you can use browser shortcuts"
+                
+            message += "\n\nWhat would you like to do next?"
+        else:
+            message += "\n\nWhat should I do next?"
         
         return message
     
-
+    def summarize_actions(self, tool_uses):
+        """Create a summary key of the actions to detect repetition"""
+        if not tool_uses:
+            return "no_action"
+        
+        summary = []
+        for tool_use in tool_uses:
+            if tool_use.name == "computer":
+                action = tool_use.input.get("action", "unknown")
+                
+                if action in ["left_click", "right_click", "mouse_move"]:
+                    coords = tool_use.input.get("coordinate", [0, 0])
+                    # Use approximate coordinates (rounded to nearest 10) to detect similar actions
+                    rounded_x = round(coords[0] / 10) * 10
+                    rounded_y = round(coords[1] / 10) * 10
+                    summary.append(f"{action}_{rounded_x}_{rounded_y}")
+                elif action == "type":
+                    text = tool_use.input.get("text", "")
+                    summary.append(f"type_{len(text)}")
+                else:
+                    summary.append(action)
+        
+        return "_".join(summary)
     
     def record_action(self, tool_name, tool_input, result):
         """Record action in history for context tracking"""
@@ -252,7 +289,6 @@ class ClaudeOrchestrator:
             url = tool_input.get("url", "")
             self.action_history.append(f"Navigated to: {url}")
             self.visited_urls.add(url)
- 
     
     async def call_claude_api(self, messages):
         """Call Claude API with proper error handling and retries"""
@@ -330,7 +366,7 @@ class ClaudeOrchestrator:
                     x_offset = (self.repeated_action_count * 5) % 15
                     y_offset = (self.repeated_action_count * 3) % 10
                     x += x_offset - 7  # -7 to +7 range
-                    y += y_offset - 7  # -5 to +5 range
+                    y += y_offset - 5  # -5 to +5 range
                     tool_input["coordinate"] = [x, y]
                     print(f"🔄 Varying coordinates to avoid loop: ({x}, {y})")
             
@@ -406,7 +442,7 @@ class ClaudeOrchestrator:
                 print(f"⚠️ Click failed: {error_info}")
                 
                 # Try clicking with offset for potential interface elements
-                for offset in [(0, -9), (0, 9), (-9, 0), (9, 0), (5, 0)]:
+                for offset in [(0, -5), (0, 5), (-5, 0), (5, 0)]:
                     print(f"🔄 Retrying click with offset {offset}")
                     retry_result = await self.chrome_adapter.click(
                         x + offset[0], y + offset[1], button
@@ -514,37 +550,3 @@ class ClaudeOrchestrator:
             print(f"❌ Error saving debug image: {e}")
             import traceback
             print(traceback.format_exc())
-
-
-    async def get_screenshot_with_dimensions(self):
-        """Get screenshot and update real dimensions based on actual screenshot size"""
-        try:
-            # Get screenshot from adapter
-            screenshot = await self.chrome_adapter.get_screenshot()
-            
-            if not screenshot:
-                print("❌ Failed to get screenshot")
-                return None
-                
-            # Update dimensions based on actual screenshot
-            try:
-                # Decode base64 to bytes
-                image_data = base64.b64decode(screenshot)
-                
-                # Open image to get dimensions
-                with Image.open(BytesIO(image_data)) as img:
-                    width, height = img.size
-                    
-                    # Update real dimensions
-                    if width != self.real_width or height != self.real_height:
-                        print(f"📐 Updated screenshot dimensions: {width}x{height} (was {self.real_width}x{self.real_height})")
-                        self.real_width = width
-                        self.real_height = height
-            except Exception as e:
-                print(f"⚠️ Could not update dimensions from screenshot: {e}")
-                
-            return screenshot
-            
-        except Exception as e:
-            print(f"❌ Error getting screenshot: {e}")
-            return None
